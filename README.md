@@ -172,6 +172,17 @@ phụ đề rời).
 > Mẹo: với tiếng Việt, mô hình `ggml-small.bin` cho kết quả tốt hơn `base` nếu
 > máy đủ nhanh. Chỉ cần chép tệp vào `assets/models/` là ứng dụng tự nhận.
 
+### Dùng từ dòng lệnh
+
+Toàn bộ pipeline trên cũng chạy được không cần giao diện, nhờ thư viện lõi:
+
+```bash
+cargo run --release --example auto_captions -- input.mp4 output.mp4 vi
+```
+
+Lệnh này nhận dạng giọng nói, in ra từng câu kèm mốc thời gian, rồi xuất MP4 có
+phụ đề cháy sẵn và âm lượng đã chuẩn hoá — hữu ích để xử lý hàng loạt.
+
 ---
 
 ## Thư viện tài nguyên
