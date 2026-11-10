@@ -54,6 +54,12 @@ Toàn bộ ứng dụng là một tệp thực thi Rust duy nhất, dùng [egui]
 
 ## Cài đặt
 
+### Tải bản dựng sẵn (nhanh nhất)
+
+Vào trang [**Releases**](https://github.com/kyhaotool/viedit/releases), tải
+`viedit-windows-x64.zip`, giải nén và chạy `viedit.exe`.
+Nhớ cài FFmpeg (`winget install Gyan.FFmpeg`) để xem trước và xuất video.
+
 ### Yêu cầu chung
 
 - [Rust](https://rustup.rs) ≥ 1.75
@@ -217,6 +223,17 @@ cargo test
 
 `tests/export.rs` dựng một dự án nhỏ từ tài nguyên mẫu rồi **xuất ra MP4 thật**
 bằng FFmpeg, sau đó kiểm tra tệp kết quả. Nếu máy không có FFmpeg, test tự bỏ qua.
+
+### Bật CI trên GitHub
+
+Quy trình build sẵn có ở `.github/workflows/build.yml.example` nhưng chưa được
+kích hoạt (token đẩy mã nguồn chưa có scope `workflow`). Muốn bật:
+
+```bash
+gh auth refresh -s workflow
+git mv .github/workflows/build.yml.example .github/workflows/build.yml
+git commit -m "ci: bật workflow build" && git push
+```
 
 ---
 
