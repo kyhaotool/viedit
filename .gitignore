@@ -17,3 +17,6 @@ Thumbs.db
 
 # Tệp dự án cá nhân
 *.vieedit
+
+# Mô hình nhận dạng giọng nói (tải trong ứng dụng, ~140 MB)
+/assets/models/*.bin

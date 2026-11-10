@@ -34,6 +34,14 @@ pub enum TrackKind {
     Video,
     Overlay,
     Audio,
+    Caption,
+}
+
+impl TrackKind {
+    /// Làn phụ đề chỉ hiển thị chữ, không có tệp nguồn.
+    pub fn is_caption(self) -> bool {
+        matches!(self, TrackKind::Caption)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -57,8 +65,44 @@ pub struct Clip {
     pub dur: f64,
     pub volume: f32,
     pub opacity: f32,
-    /// Chữ hiển thị (dùng cho tiêu đề chèn).
+    /// Chữ hiển thị (dùng cho tiêu đề chèn và phụ đề).
     pub text: String,
+    /// Chuỗi hiệu ứng FFmpeg áp dụng khi xuất (ví dụ `hue=s=0`).
+    #[serde(default)]
+    pub effect: String,
+    /// Độ sáng, 0.0 là giữ nguyên (-1..1).
+    #[serde(default)]
+    pub brightness: f32,
+    /// Độ tương phản, 1.0 là giữ nguyên.
+    #[serde(default = "one")]
+    pub contrast: f32,
+    /// Độ bão hoà màu, 1.0 là giữ nguyên.
+    #[serde(default = "one")]
+    pub saturation: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Default for Clip {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            source: 0,
+            track: 0,
+            start: 0.0,
+            in_pt: 0.0,
+            dur: 1.0,
+            volume: 1.0,
+            opacity: 1.0,
+            text: String::new(),
+            effect: String::new(),
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
+    }
 }
 
 impl Clip {
@@ -67,6 +111,34 @@ impl Clip {
     }
     pub fn contains(&self, t: f64) -> bool {
         t >= self.start && t < self.end()
+    }
+    /// Có chỉnh màu khác mặc định hay không.
+    pub fn has_color_adjust(&self) -> bool {
+        self.brightness.abs() > 1e-3
+            || (self.contrast - 1.0).abs() > 1e-3
+            || (self.saturation - 1.0).abs() > 1e-3
+    }
+}
+
+/// Kiểu chữ phụ đề dùng chung cho cả dự án.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CaptionStyle {
+    /// Cỡ chữ tính theo tỉ lệ chiều cao khung hình.
+    pub font_scale: f32,
+    pub color: [u8; 3],
+    pub outline: bool,
+    /// Khoảng cách từ đáy khung hình (tỉ lệ chiều cao).
+    pub bottom: f32,
+}
+
+impl Default for CaptionStyle {
+    fn default() -> Self {
+        Self {
+            font_scale: 0.052,
+            color: [255, 255, 255],
+            outline: true,
+            bottom: 0.10,
+        }
     }
 }
 
@@ -80,6 +152,8 @@ pub struct Project {
     pub tracks: Vec<Track>,
     pub clips: Vec<Clip>,
     pub next_id: u64,
+    #[serde(default)]
+    pub caption: CaptionStyle,
 }
 
 impl Default for Project {
@@ -109,9 +183,16 @@ impl Default for Project {
                     muted: false,
                     hidden: false,
                 },
+                Track {
+                    kind: TrackKind::Caption,
+                    name: String::new(),
+                    muted: false,
+                    hidden: false,
+                },
             ],
             clips: Vec::new(),
             next_id: 1,
+            caption: CaptionStyle::default(),
         }
     }
 }
@@ -119,6 +200,10 @@ impl Default for Project {
 pub const TRACK_OVERLAY: usize = 0;
 pub const TRACK_VIDEO: usize = 1;
 pub const TRACK_AUDIO: usize = 2;
+pub const TRACK_CAPTION: usize = 3;
+
+/// Thứ tự hiển thị các làn từ trên xuống trong dòng thời gian.
+pub const TRACK_DISPLAY_ORDER: [usize; 4] = [TRACK_CAPTION, TRACK_OVERLAY, TRACK_VIDEO, TRACK_AUDIO];
 
 impl Project {
     pub fn new_id(&mut self) -> u64 {
@@ -164,6 +249,35 @@ impl Project {
     pub fn visual_at(&self, t: f64) -> Option<&Clip> {
         self.clip_at(TRACK_OVERLAY, t)
             .or_else(|| self.clip_at(TRACK_VIDEO, t))
+    }
+
+    /// Bổ sung làn phụ đề cho các dự án cũ (lưu từ bản 0.1).
+    pub fn ensure_tracks(&mut self) {
+        while self.tracks.len() <= TRACK_CAPTION {
+            self.tracks.push(Track {
+                kind: TrackKind::Caption,
+                name: String::new(),
+                muted: false,
+                hidden: false,
+            });
+        }
+        if !self.tracks[TRACK_CAPTION].kind.is_caption() {
+            self.tracks[TRACK_CAPTION].kind = TrackKind::Caption;
+        }
+    }
+
+    /// Xoá toàn bộ phụ đề.
+    pub fn clear_captions(&mut self) {
+        self.clips.retain(|c| c.track != TRACK_CAPTION);
+    }
+
+    pub fn caption_clips(&self) -> Vec<&Clip> {
+        self.clips_on_track(TRACK_CAPTION)
+    }
+
+    /// Phụ đề đang hiển thị tại thời điểm `t`.
+    pub fn caption_at(&self, t: f64) -> Option<&Clip> {
+        self.clip_at(TRACK_CAPTION, t)
     }
 
     pub fn find_free_start(&self, track: usize, dur: f64, want: f64) -> f64 {

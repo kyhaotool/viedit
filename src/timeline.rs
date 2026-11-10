@@ -3,14 +3,23 @@
 use egui::{Color32, FontId, Id, Rect, Sense, Stroke};
 
 use crate::i18n::Tr;
-use crate::model::{fmt_time, Clip, Project, TrackKind};
+use crate::model::{fmt_time, Clip, Project, TrackKind, TRACK_DISPLAY_ORDER};
 use crate::theme;
 
 const HEADER_W: f32 = 112.0;
 const RULER_H: f32 = 26.0;
 const TRACK_H: f32 = 56.0;
+const CAPTION_H: f32 = 42.0;
 const TRACK_GAP: f32 = 5.0;
 const MIN_DUR: f64 = 0.1;
+
+fn row_height(kind: TrackKind) -> f32 {
+    if kind.is_caption() {
+        CAPTION_H
+    } else {
+        TRACK_H
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DragKind {
@@ -64,6 +73,7 @@ fn track_color(kind: TrackKind) -> Color32 {
         TrackKind::Video => theme::TRACK_VIDEO,
         TrackKind::Overlay => theme::TRACK_OVERLAY,
         TrackKind::Audio => theme::TRACK_AUDIO,
+        TrackKind::Caption => theme::TRACK_CAPTION,
     }
 }
 
@@ -124,21 +134,25 @@ pub fn show(
 
     // --- header các track ---
     let mut y = rect.top() + RULER_H + TRACK_GAP;
-    let mut row_rects: Vec<Rect> = Vec::new();
-    for i in 0..project.tracks.len() {
+    let mut row_rects: Vec<Rect> = vec![Rect::NOTHING; project.tracks.len()];
+    for i in TRACK_DISPLAY_ORDER {
+        if i >= project.tracks.len() {
+            continue;
+        }
+        let kind = project.tracks[i].kind;
+        let h = row_height(kind);
         let row = Rect::from_min_max(
             egui::pos2(content_left, y),
-            egui::pos2(content_right, y + TRACK_H),
+            egui::pos2(content_right, y + h),
         );
-        row_rects.push(row);
+        row_rects[i] = row;
 
         let head = Rect::from_min_max(
             egui::pos2(rect.left(), y),
-            egui::pos2(content_left, y + TRACK_H),
+            egui::pos2(content_left, y + h),
         );
         painter.rect_filled(head, egui::Rounding::same(6.0), theme::PANEL_2);
 
-        let kind = project.tracks[i].kind;
         let color = track_color(kind);
         painter.rect_filled(
             Rect::from_min_max(head.min, egui::pos2(head.left() + 3.0, head.bottom())),
@@ -150,63 +164,75 @@ pub fn show(
             TrackKind::Video => tr.track_video,
             TrackKind::Overlay => tr.track_overlay,
             TrackKind::Audio => tr.track_audio,
+            TrackKind::Caption => tr.track_caption,
         };
         painter.text(
-            egui::pos2(head.left() + 12.0, head.top() + 10.0),
+            egui::pos2(head.left() + 12.0, head.top() + if kind.is_caption() { 5.0 } else { 10.0 }),
             egui::Align2::LEFT_TOP,
             name,
             FontId::proportional(12.0),
             theme::TEXT,
         );
 
-        // nút tắt tiếng / ẩn
-        let m_rect = Rect::from_min_size(
-            egui::pos2(head.left() + 11.0, head.bottom() - 22.0),
-            egui::vec2(24.0, 16.0),
-        );
-        let h_rect = Rect::from_min_size(
-            egui::pos2(head.left() + 39.0, head.bottom() - 22.0),
-            egui::vec2(24.0, 16.0),
-        );
-
         let muted = project.tracks[i].muted;
         let hidden = project.tracks[i].hidden;
-        let m = ui.put(
-            m_rect,
-            egui::Button::new(
-                egui::RichText::new("M").size(9.5).color(if muted {
-                    theme::ACCENT
-                } else {
-                    theme::FAINT
-                }),
-            )
-            .fill(if muted { theme::ACCENT_DIM } else { theme::PANEL_3 })
-            .rounding(egui::Rounding::same(4.0)),
-        );
-        if m.clicked() {
-            project.tracks[i].muted = !muted;
-            changed = true;
-        }
-        let h = ui.put(
-            h_rect,
-            egui::Button::new(
-                egui::RichText::new("👁").size(9.0).color(if hidden {
-                    theme::ACCENT
-                } else {
-                    theme::FAINT
-                }),
-            )
-            .fill(if hidden { theme::ACCENT_DIM } else { theme::PANEL_3 })
-            .rounding(egui::Rounding::same(4.0)),
-        );
-        if h.clicked() {
-            project.tracks[i].hidden = !hidden;
-            changed = true;
+
+        // nút tắt tiếng (mọi làn trừ phụ đề)
+        if !kind.is_caption() {
+            let m_rect = Rect::from_min_size(
+                egui::pos2(head.left() + 11.0, head.bottom() - 22.0),
+                egui::vec2(24.0, 16.0),
+            );
+            let m = ui.put(
+                m_rect,
+                egui::Button::new(
+                    egui::RichText::new("M").size(9.5).color(if muted {
+                        theme::ACCENT
+                    } else {
+                        theme::FAINT
+                    }),
+                )
+                .fill(if muted { theme::ACCENT_DIM } else { theme::PANEL_3 })
+                .rounding(egui::Rounding::same(4.0)),
+            );
+            if m.clicked() {
+                project.tracks[i].muted = !muted;
+                changed = true;
+            }
         }
 
-        painter.rect_filled(row, egui::Rounding::same(6.0), theme::PANEL_2.gamma_multiply(0.55));
+        // nút ẩn/hiện (mọi làn trừ âm thanh)
+        if !matches!(kind, TrackKind::Audio) {
+            let hx = if kind.is_caption() { 11.0 } else { 39.0 };
+            let h_rect = Rect::from_min_size(
+                egui::pos2(head.left() + hx, head.bottom() - 22.0),
+                egui::vec2(24.0, 16.0),
+            );
+            let hb = ui.put(
+                h_rect,
+                egui::Button::new(
+                    egui::RichText::new("👁").size(9.0).color(if hidden {
+                        theme::ACCENT
+                    } else {
+                        theme::FAINT
+                    }),
+                )
+                .fill(if hidden { theme::ACCENT_DIM } else { theme::PANEL_3 })
+                .rounding(egui::Rounding::same(4.0)),
+            );
+            if hb.clicked() {
+                project.tracks[i].hidden = !hidden;
+                changed = true;
+            }
+        }
 
-        y += TRACK_H + TRACK_GAP;
+        painter.rect_filled(
+            row,
+            egui::Rounding::same(6.0),
+            theme::PANEL_2.gamma_multiply(0.55),
+        );
+
+        y += h + TRACK_GAP;
     }
 
     // --- các đoạn phim ---
@@ -260,23 +286,41 @@ pub fn show(
             base.linear_multiply(1.35),
         );
 
-        let name = project
-            .source(clip.source)
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| "?".to_string());
+        let is_caption = kind.is_caption();
+        let name = if is_caption {
+            let t = clip.text.trim();
+            if t.is_empty() {
+                tr.caption_empty.to_string()
+            } else {
+                t.to_string()
+            }
+        } else {
+            project
+                .source(clip.source)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "?".to_string())
+        };
         painter.text(
-            egui::pos2(clip_rect.left() + 9.0, clip_rect.top() + 7.0),
+            egui::pos2(clip_rect.left() + 9.0, clip_rect.top() + if is_caption { 4.0 } else { 7.0 }),
             egui::Align2::LEFT_TOP,
-            truncate(&name, 26),
-            FontId::proportional(11.0),
-            Color32::from_rgb(240, 244, 250),
+            truncate(&name, if is_caption { 40 } else { 26 }),
+            FontId::proportional(if is_caption { 11.5 } else { 11.0 }),
+            if is_caption {
+                Color32::from_rgb(28, 22, 8)
+            } else {
+                Color32::from_rgb(240, 244, 250)
+            },
         );
         painter.text(
             egui::pos2(clip_rect.left() + 9.0, clip_rect.bottom() - 15.0),
             egui::Align2::LEFT_TOP,
             fmt_time(clip.dur),
             FontId::proportional(9.5),
-            Color32::from_rgba_unmultiplied(255, 255, 255, 150),
+            if is_caption {
+                Color32::from_rgba_unmultiplied(40, 30, 8, 190)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+            },
         );
 
         if is_sel {
@@ -352,7 +396,11 @@ pub fn show(
                             let max_start = drag.orig_start + drag.orig_dur - MIN_DUR;
                             new_start = new_start.min(max_start);
                             let delta = new_start - drag.orig_start;
-                            if drag.orig_in + delta >= 0.0 {
+                            if project.tracks[clip.track].kind.is_caption() {
+                                in_pt = 0.0;
+                                dur = (drag.orig_dur - delta).max(MIN_DUR);
+                                start = new_start;
+                            } else if drag.orig_in + delta >= 0.0 {
                                 in_pt = drag.orig_in + delta;
                                 dur = (drag.orig_dur - delta).max(MIN_DUR);
                                 start = new_start;

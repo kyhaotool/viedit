@@ -34,17 +34,29 @@ Toàn bộ ứng dụng là một tệp thực thi Rust duy nhất, dùng [egui]
 
 ## Tính năng
 
-- **Dòng thời gian nhiều lớp**: track Hình ảnh, Lớp phủ, Âm thanh.
-- **Kéo – cắt – ghép trực tiếp**: kéo thân đoạn để di chuyển, kéo hai mép để
-  cắt, nhấn `S` để cắt đôi tại con trỏ.
+- **Bốn làn kiểu Concat**: Phụ đề, Lớp phủ, Hình ảnh, Âm thanh — xếp đúng thứ tự
+  như các trình dựng phim chuyên nghiệp, mỗi làn có nút tắt tiếng / ẩn riêng.
+- **Phụ đề tự động (AI, chạy trên máy)**: nhận dạng giọng nói bằng mô hình
+  Whisper ngay trong FFmpeg, đổ kết quả thành từng câu trên làn Phụ đề.
+  Không gửi dữ liệu lên mạng, không cần tài khoản.
+- **Phụ đề cháy sẵn khi xuất**: chọn cỡ chữ, vị trí, màu, viền chữ; phụ đề được
+  vẽ thẳng vào khung hình bằng font Be Vietnam Pro (đủ dấu tiếng Việt).
+- **Nhập / xuất SRT**: trao đổi phụ đề với YouTube, Premiere, DaVinci…
+- **12 hiệu ứng màu dựng sẵn**: đen trắng, tông ấm/lạnh, vignette, mờ mềm, sắc
+  nét, vintage, noir, âm bản… kèm thanh chỉnh độ sáng / tương phản / bão hoà.
+- **Trộn nhạc nền**: các đoạn trên làn Âm thanh được trộn vào video khi xuất,
+  có chỉnh âm lượng từng đoạn.
+- **Chuẩn hoá âm lượng EBU R128** (`loudnorm`) cho video đăng mạng xã hội.
+- **Khung hình dựng sẵn**: YouTube 16:9, Reels/TikTok/Shorts 9:16, vuông 1:1, 4K.
+- **Dòng thời gian nhiều lớp**: kéo – cắt – ghép trực tiếp, nhấn `S` để cắt đôi.
 - **Bám dính thông minh**: đoạn phim tự bám vào con trỏ thời gian và các đoạn
   bên cạnh.
 - **Thư viện tiêu đề động**: 158 tệp GIF/MP4 (tiêu đề, lower-third, nền chuyển
   sắc, hiệu ứng mạng xã hội, chuyển cảnh).
 - **Xem trước theo thời gian thực**: giải mã GIF ngay trong tiến trình, giải mã
   video qua FFmpeg với bộ đệm khung hình.
-- **Xuất video MP4**: bộ lọc `trim` / `concat` / `overlay` của FFmpeg, có thanh
-  tiến trình.
+- **Xuất video MP4**: bộ lọc `trim` / `concat` / `overlay` / `drawtext` của
+  FFmpeg, có thanh tiến trình.
 - **Lưu / mở dự án**: định dạng `.vieedit` (JSON thuần, đọc được bằng tay).
 - **Hoàn tác / làm lại** 80 bước.
 - **Song ngữ**: Tiếng Việt ⇄ English ngay trong ứng dụng.
@@ -64,7 +76,10 @@ Nhớ cài FFmpeg (`winget install Gyan.FFmpeg`) để xem trước và xuất v
 ### Yêu cầu chung
 
 - [Rust](https://rustup.rs) ≥ 1.75
-- [FFmpeg](https://ffmpeg.org/download.html) ≥ 6.0 (để xem trước và xuất video)
+- [FFmpeg](https://ffmpeg.org/download.html) ≥ 7.0, **bản đầy đủ** (cần các filter
+  `whisper`, `loudnorm`, `drawtext`, `subtitles`). Bản Gyan.dev của Windows và
+  gói `ffmpeg` của Fedora đều có sẵn; nếu thiếu `whisper`, tính năng phụ đề tự
+  động sẽ báo lỗi còn các tính năng khác vẫn chạy.
 
 ### Windows
 
@@ -125,7 +140,8 @@ vào cạnh `viedit.exe`:
 viedit/
 ├── viedit.exe
 ├── assets/
-│   └── library/       ← thư viện tiêu đề động
+│   ├── library/       ← thư viện tiêu đề động
+│   └── models/        ← mô hình Whisper (tuỳ chọn, tải trong ứng dụng)
 └── ffmpeg/
     └── bin/
         ├── ffmpeg.exe
@@ -133,6 +149,28 @@ viedit/
 ```
 
 `build.ps1` (Windows) và `build.sh` (Fedora) tự tạo cấu trúc này trong `./dist`.
+
+---
+
+## Phụ đề tự động
+
+VieEdit nhận dạng giọng nói **ngay trên máy** bằng filter `whisper` của FFmpeg
+(không gọi API, không gửi dữ liệu đi đâu).
+
+1. Nhập video (hoặc tệp âm thanh) vào dòng thời gian.
+2. Chọn **Phụ đề → Phụ đề tự động…**
+3. Nhấn **Tải mô hình** nếu chưa có (141 MB, chỉ một lần).
+4. Chọn ngôn ngữ — *Tiếng Việt*, *English* hoặc *Tự nhận* — rồi nhấn
+   **Bắt đầu nhận dạng**.
+5. Kết quả đổ thành từng câu trên **làn Phụ đề**; bấm vào câu để sửa chữ, kéo
+   hai mép để đổi thời lượng.
+
+Khi xuất video, bật **Ghi phụ đề vào video** để cháy phụ đề vào khung hình, hoặc
+dùng **Phụ đề → Xuất phụ đề (.srt)** để tải lên YouTube (YouTube sẽ tự hiển thị
+phụ đề rời).
+
+> Mẹo: với tiếng Việt, mô hình `ggml-small.bin` cho kết quả tốt hơn `base` nếu
+> máy đủ nhanh. Chỉ cần chép tệp vào `assets/models/` là ứng dụng tự nhận.
 
 ---
 

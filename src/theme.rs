@@ -21,6 +21,7 @@ pub const GREEN: Color32 = Color32::from_rgb(52, 211, 153);
 pub const TRACK_VIDEO: Color32 = Color32::from_rgb(56, 120, 200);
 pub const TRACK_OVERLAY: Color32 = Color32::from_rgb(170, 90, 200);
 pub const TRACK_AUDIO: Color32 = Color32::from_rgb(40, 160, 130);
+pub const TRACK_CAPTION: Color32 = Color32::from_rgb(214, 158, 46);
 
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();

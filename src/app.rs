@@ -9,17 +9,38 @@ use egui::{Color32, FontId, RichText, Sense};
 use crate::filepicker::FilePicker;
 use crate::i18n::{tr, Lang, Tr};
 use crate::library::{self, Asset, AssetKind, Category};
-use crate::media::{self, ExportJob, ExportMsg, FrameLoader, FrameReq, Quality};
+use crate::media::{
+    self, ExportJob, ExportMsg, ExportOptions, FrameLoader, FrameReq, Quality, TranscribeJob,
+    TranscribeMsg,
+};
 use crate::model::{
-    fmt_dur, fmt_time, Clip, Project, Source, SourceKind, TRACK_OVERLAY, TRACK_VIDEO,
+    fmt_dur, fmt_time, Clip, Project, Source, SourceKind, TRACK_AUDIO, TRACK_CAPTION, TRACK_OVERLAY,
+    TRACK_VIDEO,
 };
 use crate::settings;
 use crate::theme;
 use crate::timeline::{self, TimelineState};
 
+/// Danh sách hiệu ứng màu dựng sẵn (chuỗi filter FFmpeg, tên VI, tên EN).
+pub const EFFECTS: &[(&str, &str, &str)] = &[
+    ("", "Không hiệu ứng", "None"),
+    ("hue=s=0", "Đen trắng", "Black & white"),
+    ("eq=contrast=1.28:saturation=1.18", "Rực rỡ", "Punchy"),
+    ("colorbalance=rs=.14:gs=.04:bs=-.10", "Tông ấm", "Warm"),
+    ("colorbalance=rs=-.10:gs=.0:bs=.14", "Tông lạnh", "Cool"),
+    ("vignette=PI/5", "Viền tối", "Vignette"),
+    ("gblur=sigma=14", "Mờ mềm", "Soft blur"),
+    ("unsharp=5:5:1.0", "Sắc nét", "Sharpen"),
+    ("curves=preset=vintage", "Cổ điển", "Vintage"),
+    ("hue=s=0,eq=contrast=1.45", "Phim noir", "Noir"),
+    ("eq=brightness=0.06:saturation=1.32", "Tươi sáng", "Bright"),
+    ("negate", "Âm bản", "Negative"),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Media,
+    Effects,
     Titles,
     Transitions,
     Gradients,
@@ -33,6 +54,8 @@ enum PickPurpose {
     SaveProject,
     ExportOutput,
     LibraryFolder,
+    ImportSrt,
+    ExportSrt,
 }
 
 struct Toast {
@@ -88,6 +111,16 @@ pub struct VieEdit {
     export_path: String,
     export_job: Option<ExportJob>,
     export_log: String,
+    export_loudnorm: bool,
+    export_captions: bool,
+
+    show_captions: bool,
+    caption_model: Option<PathBuf>,
+    caption_lang: String,
+    transcribe_job: Option<TranscribeJob>,
+    transcribe_status: String,
+    download_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    downloading: bool,
 
     ffmpeg_ok: bool,
     ffmpeg_line: String,
@@ -150,6 +183,15 @@ impl VieEdit {
             export_path: String::new(),
             export_job: None,
             export_log: String::new(),
+            export_loudnorm: false,
+            export_captions: true,
+            show_captions: false,
+            caption_model: media::find_model(),
+            caption_lang: "vi".to_string(),
+            transcribe_job: None,
+            transcribe_status: String::new(),
+            download_rx: None,
+            downloading: false,
             ffmpeg_ok: media::available(),
             ffmpeg_line: media::version_line(),
         }
@@ -219,6 +261,7 @@ impl VieEdit {
         let src = self.project.source(src_id)?.clone();
         let track = match src.kind {
             SourceKind::Video => TRACK_VIDEO,
+            SourceKind::Audio => TRACK_AUDIO,
             _ => TRACK_OVERLAY,
         };
         let default_dur = match src.kind {
@@ -239,6 +282,7 @@ impl VieEdit {
             volume: 1.0,
             opacity: 1.0,
             text: String::new(),
+            ..Default::default()
         });
         Some(id)
     }
@@ -275,14 +319,10 @@ impl VieEdit {
         }
         self.project.clips.push(Clip {
             id: new_id,
-            source: clip.source,
-            track: clip.track,
             start: t,
             in_pt: clip.in_pt + offset,
             dur: clip.dur - offset,
-            volume: clip.volume,
-            opacity: clip.opacity,
-            text: clip.text.clone(),
+            ..clip
         });
         self.selected = Some(new_id);
     }
@@ -418,6 +458,63 @@ impl VieEdit {
                             }
                         });
 
+                        ui.menu_button(tr.menu_clip, |ui| {
+                            let has_sel = self.selected.is_some();
+                            if ui
+                                .add_enabled(has_sel, egui::Button::new(tr.btn_split))
+                                .clicked()
+                            {
+                                self.split_at_playhead();
+                                ui.close_menu();
+                            }
+                            if ui
+                                .add_enabled(has_sel, egui::Button::new(tr.btn_duplicate))
+                                .clicked()
+                            {
+                                self.duplicate_selected();
+                                ui.close_menu();
+                            }
+                            if ui
+                                .add_enabled(has_sel, egui::Button::new(tr.btn_delete))
+                                .clicked()
+                            {
+                                self.delete_selected();
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button(tr.lbl_effect).clicked() {
+                                self.tab = Tab::Effects;
+                                ui.close_menu();
+                            }
+                        });
+
+                        ui.menu_button(tr.menu_captions, |ui| {
+                            if ui.button(tr.menu_auto_captions).clicked() {
+                                self.show_captions = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("＋ Thêm phụ đề tại con trỏ").clicked() {
+                                self.add_caption_at_playhead();
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button(tr.menu_import_srt).clicked() {
+                                self.pick_srt(true);
+                                ui.close_menu();
+                            }
+                            if ui.button(tr.menu_export_srt).clicked() {
+                                self.pick_srt(false);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button(tr.menu_clear_captions).clicked() {
+                                self.checkpoint();
+                                self.project.clear_captions();
+                                self.selected = None;
+                                ui.close_menu();
+                            }
+                        });
+
                         ui.menu_button(tr.menu_help, |ui| {
                             if ui.button(tr.menu_shortcuts).clicked() {
                                 self.show_shortcuts = true;
@@ -529,6 +626,7 @@ impl VieEdit {
 
                 let tabs = [
                     (Tab::Media, tr.tab_media),
+                    (Tab::Effects, tr.tab_effects),
                     (Tab::Titles, tr.tab_titles),
                     (Tab::Transitions, tr.tab_transitions),
                     (Tab::Gradients, tr.tab_gradients),
@@ -558,6 +656,8 @@ impl VieEdit {
 
                 if self.tab == Tab::Media {
                     self.media_grid(ui);
+                } else if self.tab == Tab::Effects {
+                    self.effects_grid(ui);
                 } else {
                     self.asset_grid(ui);
                 }
@@ -569,6 +669,106 @@ impl VieEdit {
         self.assets = library::scan(&self.library_root);
     }
 
+    fn effects_grid(&mut self, ui: &mut egui::Ui) {
+        let tr = self.t();
+        let lang_en = self.lang == Lang::En;
+        let current = self
+            .selected
+            .and_then(|id| self.project.clip(id).map(|c| c.effect.clone()))
+            .unwrap_or_default();
+
+        ui.label(
+            RichText::new(tr.msg_effect_hint)
+                .size(9.5)
+                .color(theme::FAINT),
+        );
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (fx, vi, en) in EFFECTS {
+                    let label = if lang_en { *en } else { *vi };
+                    let on = current == *fx;
+                    let btn = egui::Button::new(
+                        RichText::new(label)
+                            .size(11.0)
+                            .color(if on { Color32::WHITE } else { theme::DIM }),
+                    )
+                    .fill(if on { theme::ACCENT_DIM } else { theme::PANEL_2 })
+                    .rounding(egui::Rounding::same(6.0))
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        if on { theme::ACCENT } else { theme::BORDER },
+                    ));
+                    if ui.add_sized([ui.available_width(), 29.0], btn).clicked() {
+                        if let Some(id) = self.selected {
+                            if let Some(c) = self.project.clip_mut(id) {
+                                c.effect = (*fx).to_string();
+                            }
+                        }
+                    }
+                }
+            });
+    }
+
+    fn add_caption_at_playhead(&mut self) {
+        self.checkpoint();
+        let at = self.playhead.max(0.0);
+        let id = self.project.new_id();
+        self.project.clips.push(Clip {
+            id,
+            source: 0,
+            track: TRACK_CAPTION,
+            start: at,
+            in_pt: 0.0,
+            dur: 2.0,
+            text: String::new(),
+            ..Default::default()
+        });
+        self.selected = Some(id);
+    }
+
+    fn add_captions(&mut self, caps: &[media::Caption]) {
+        self.checkpoint();
+        self.project.clear_captions();
+        for c in caps {
+            let id = self.project.new_id();
+            self.project.clips.push(Clip {
+                id,
+                source: 0,
+                track: TRACK_CAPTION,
+                start: c.start.max(0.0),
+                in_pt: 0.0,
+                dur: (c.end - c.start).max(0.2),
+                text: c.text.clone(),
+                ..Default::default()
+            });
+        }
+        self.selected = None;
+    }
+
+    fn pick_srt(&mut self, import: bool) {
+        let tr = self.t();
+        let start = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        if import {
+            self.picker_purpose = PickPurpose::ImportSrt;
+            self.picker
+                .open_pick(tr.menu_import_srt, &start, &["srt", "vtt"]);
+        } else {
+            self.picker_purpose = PickPurpose::ExportSrt;
+            let name = if self.project.name.is_empty() {
+                "phu-de.srt".to_string()
+            } else {
+                format!("{}.srt", self.project.name)
+            };
+            self.picker.open_save(tr.menu_export_srt, &start, &name, "srt");
+        }
+    }
+
     fn asset_grid(&mut self, ui: &mut egui::Ui) {
         let tr = self.t();
         let cat = match self.tab {
@@ -576,7 +776,7 @@ impl VieEdit {
             Tab::Transitions => Some(Category::Transitions),
             Tab::Gradients => Some(Category::Gradients),
             Tab::Social => Some(Category::Social),
-            Tab::Media => None,
+            Tab::Media | Tab::Effects => None,
         };
         let needle = self.search.to_lowercase();
         let assets: Vec<Asset> = self
@@ -887,12 +1087,17 @@ impl VieEdit {
                 }
 
                 ui.add_space(10.0);
-                ui.label(RichText::new("Chữ trên video").size(10.5).color(theme::DIM));
+                let text_label = if clip.track == TRACK_CAPTION {
+                    tr.lbl_text
+                } else {
+                    "Chữ trên video"
+                };
+                ui.label(RichText::new(text_label).size(10.5).color(theme::DIM));
                 let mut text = clip.text.clone();
                 if ui
                     .add(
                         egui::TextEdit::multiline(&mut text)
-                            .desired_rows(2)
+                            .desired_rows(if clip.track == TRACK_CAPTION { 3 } else { 2 })
                             .desired_width(f32::INFINITY),
                     )
                     .changed()
@@ -900,6 +1105,110 @@ impl VieEdit {
                     if let Some(c) = self.project.clip_mut(id) {
                         c.text = text;
                     }
+                }
+
+                if clip.track == TRACK_CAPTION {
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(tr.lbl_caption_style)
+                            .size(10.5)
+                            .color(theme::DIM)
+                            .strong(),
+                    );
+                    let mut fs = self.project.caption.font_scale;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut fs, 0.02..=0.12)
+                                .text(tr.lbl_font_size)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        self.project.caption.font_scale = fs;
+                    }
+                    let mut posv = self.project.caption.bottom;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut posv, 0.02..=0.40)
+                                .text(tr.lbl_position)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        self.project.caption.bottom = posv;
+                    }
+                    ui.horizontal(|ui| {
+                        let mut color = self.project.caption.color;
+                        if ui.color_edit_button_srgb(&mut color).changed() {
+                            self.project.caption.color = color;
+                        }
+                        let mut outline = self.project.caption.outline;
+                        if ui.checkbox(&mut outline, "Viền chữ").changed() {
+                            self.project.caption.outline = outline;
+                        }
+                    });
+                } else {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(tr.lbl_effect).size(10.5).color(theme::DIM));
+                    let current = clip.effect.clone();
+                    let lang_en = self.lang == Lang::En;
+                    egui::ComboBox::from_id_source("clip-effect")
+                        .selected_text(effect_label(&current, lang_en))
+                        .show_ui(ui, |ui| {
+                            for (fx, vi, en) in EFFECTS {
+                                let label = if lang_en { *en } else { *vi };
+                                if ui.selectable_label(current == *fx, label).clicked() {
+                                    if let Some(c) = self.project.clip_mut(id) {
+                                        c.effect = (*fx).to_string();
+                                    }
+                                }
+                            }
+                        });
+                    ui.add_space(6.0);
+                    let mut br = clip.brightness;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut br, -0.6..=0.6)
+                                .text(tr.lbl_brightness)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        if let Some(c) = self.project.clip_mut(id) {
+                            c.brightness = br;
+                        }
+                    }
+                    let mut ct = clip.contrast;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut ct, 0.4..=2.2)
+                                .text(tr.lbl_contrast)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        if let Some(c) = self.project.clip_mut(id) {
+                            c.contrast = ct;
+                        }
+                    }
+                    let mut sa = clip.saturation;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut sa, 0.0..=2.4)
+                                .text(tr.lbl_saturation)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        if let Some(c) = self.project.clip_mut(id) {
+                            c.saturation = sa;
+                        }
+                    }
+                    ui.label(
+                        RichText::new(tr.msg_effect_hint)
+                            .size(8.5)
+                            .color(theme::FAINT),
+                    );
                 }
 
                 ui.add_space(12.0);
@@ -962,6 +1271,23 @@ impl VieEdit {
                 .changed()
             {
                 self.project.fps = fps;
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.label(RichText::new(tr.lbl_preset).size(10.0).color(theme::FAINT));
+        ui.horizontal_wrapped(|ui| {
+            for (w, h, label) in [
+                (1920u32, 1080u32, "YouTube 16:9"),
+                (1080, 1920, "Reels 9:16"),
+                (1080, 1080, "Vuông 1:1"),
+                (3840, 2160, "YouTube 4K"),
+            ] {
+                let on = self.project.width == w && self.project.height == h;
+                if ui.selectable_label(on, label).clicked() {
+                    self.project.width = w;
+                    self.project.height = h;
+                }
             }
         });
 
@@ -1151,6 +1477,49 @@ impl VieEdit {
                 if let Some((tex, op)) = overlay {
                     draw_texture_fit(painter, canvas, &tex, op);
                 }
+
+                // Làn phụ đề
+                if self
+                    .project
+                    .tracks
+                    .get(TRACK_CAPTION)
+                    .map(|t| !t.hidden)
+                    .unwrap_or(true)
+                {
+                    if let Some(cap) = self.project.caption_at(self.playhead).cloned() {
+                        let style = self.project.caption.clone();
+                        let fs = (canvas.height() * style.font_scale).max(9.0);
+                        let [cr, cg, cb] = style.color;
+                        let pos = egui::pos2(
+                            canvas.center().x,
+                            canvas.bottom() - canvas.height() * style.bottom,
+                        );
+                        if style.outline {
+                            for (dx, dy) in [
+                                (-1.6, 0.0),
+                                (1.6, 0.0),
+                                (0.0, -1.6),
+                                (0.0, 1.6),
+                            ] {
+                                painter.text(
+                                    pos + egui::vec2(dx, dy),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &cap.text,
+                                    FontId::proportional(fs),
+                                    Color32::from_rgb(0, 0, 0),
+                                );
+                            }
+                        }
+                        painter.text(
+                            pos,
+                            egui::Align2::CENTER_BOTTOM,
+                            &cap.text,
+                            FontId::proportional(fs),
+                            Color32::from_rgb(cr, cg, cb),
+                        );
+                    }
+                }
+
                 if let Some(txt) = text {
                     painter.text(
                         egui::pos2(canvas.center().x, canvas.bottom() - canvas.height() * 0.12),
@@ -1374,7 +1743,8 @@ impl VieEdit {
     fn load_project(&mut self, path: &Path) {
         match std::fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str::<Project>(&text) {
-                Ok(p) => {
+                Ok(mut p) => {
+                    p.ensure_tracks();
                     self.checkpoint();
                     self.project = p;
                     self.project_path = Some(path.to_path_buf());
@@ -1488,6 +1858,27 @@ impl VieEdit {
                         }
                     });
 
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(tr.lbl_preset).size(11.0).color(theme::DIM));
+                    ui.horizontal_wrapped(|ui| {
+                        for (w, h, label) in [
+                            (1920u32, 1080u32, "YouTube 16:9"),
+                            (1080, 1920, "Reels 9:16"),
+                            (1080, 1080, "Vuông 1:1"),
+                            (3840, 2160, "4K"),
+                        ] {
+                            let on = self.project.width == w && self.project.height == h;
+                            if ui.selectable_label(on, label).clicked() {
+                                self.project.width = w;
+                                self.project.height = h;
+                            }
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut self.export_loudnorm, tr.lbl_loudnorm);
+                    ui.checkbox(&mut self.export_captions, tr.lbl_burn_captions);
+
                     ui.add_space(10.0);
                     if let Some(job) = &self.export_job {
                         ui.add(
@@ -1551,11 +1942,12 @@ impl VieEdit {
                                     if let Some(parent) = path.parent() {
                                         let _ = std::fs::create_dir_all(parent);
                                     }
-                                    match media::start_export(
-                                        &project,
-                                        &path,
-                                        self.export_quality,
-                                    ) {
+                                    let opts = ExportOptions {
+                                        quality: self.export_quality,
+                                        loudnorm: self.export_loudnorm,
+                                        burn_captions: self.export_captions,
+                                    };
+                                    match media::start_export_with(&project, &path, opts) {
                                         Ok(job) => {
                                             self.export_job = Some(job);
                                             self.export_log.clear();
@@ -1572,6 +1964,207 @@ impl VieEdit {
             if !open {
                 self.show_export = false;
             }
+        }
+    }
+
+    fn poll_transcribe(&mut self, ctx: &egui::Context) {
+        let tr = self.t();
+        let mut done: Option<Result<String, String>> = None;
+        let mut status: Option<String> = None;
+        if let Some(job) = &mut self.transcribe_job {
+            while let Ok(msg) = job.rx.try_recv() {
+                match msg {
+                    TranscribeMsg::Status(s) => {
+                        status = Some(if s == "audio" {
+                            "Đang trích âm thanh…".to_string()
+                        } else {
+                            tr.msg_transcribing.to_string()
+                        });
+                    }
+                    TranscribeMsg::Done(res) => {
+                        job.finished = true;
+                        job.result = Some(res.clone());
+                        done = Some(res);
+                    }
+                }
+            }
+            if !job.finished {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
+        if let Some(s) = status {
+            self.transcribe_status = s;
+        }
+        if let Some(res) = done {
+            self.transcribe_job = None;
+            self.transcribe_status.clear();
+            match res {
+                Ok(srt) => {
+                    let caps = media::parse_srt(&srt);
+                    if caps.is_empty() {
+                        let msg = tr.msg_no_speech.to_string();
+                        self.pending_toast = Some((msg, false));
+                    } else {
+                        self.add_captions(&caps);
+                        let msg = format!("{} ({})", tr.msg_transcribe_done, caps.len());
+                        self.pending_toast = Some((msg, true));
+                        self.show_captions = false;
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{} {}", tr.msg_transcribe_failed, e);
+                    self.pending_toast = Some((msg, false));
+                }
+            }
+        }
+
+        let downloaded = self
+            .download_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
+        if let Some(res) = downloaded {
+            self.downloading = false;
+            self.download_rx = None;
+            match res {
+                Ok(()) => {
+                    self.caption_model = media::find_model();
+                    let msg = tr.msg_download_done.to_string();
+                    self.pending_toast = Some((msg, true));
+                }
+                Err(e) => {
+                    let msg = format!("{} {}", tr.msg_download_failed, e);
+                    self.pending_toast = Some((msg, false));
+                }
+            }
+        } else if self.download_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        }
+    }
+
+    fn captions_window(&mut self, ctx: &egui::Context) {
+        if !self.show_captions {
+            return;
+        }
+        let tr = self.t();
+        let mut open = true;
+        egui::Window::new(tr.dlg_captions)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(450.0);
+                ui.label(RichText::new(tr.lbl_model).size(10.5).color(theme::DIM));
+                match self.caption_model.clone() {
+                    Some(p) => {
+                        let name = p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("model")
+                            .to_string();
+                        let mb = std::fs::metadata(&p)
+                            .map(|m| m.len() as f64 / 1_000_000.0)
+                            .unwrap_or(0.0);
+                        ui.label(
+                            RichText::new(format!("{} · {:.0} MB", name, mb))
+                                .size(11.0)
+                                .color(theme::GREEN),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(tr.msg_model_missing)
+                                .size(10.5)
+                                .color(theme::GOLD),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    !self.downloading,
+                                    theme::accent_button(tr.btn_download),
+                                )
+                                .clicked()
+                            {
+                                let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+                                let dest = media::models_dir().join("ggml-base.bin");
+                                self.download_rx =
+                                    Some(media::start_model_download(url, &dest));
+                                self.downloading = true;
+                            }
+                            if self.downloading {
+                                ui.add(egui::Spinner::new());
+                                ui.label(
+                                    RichText::new(tr.msg_downloading)
+                                        .size(10.0)
+                                        .color(theme::DIM),
+                                );
+                            }
+                        });
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.label(RichText::new("Ngôn ngữ").size(10.5).color(theme::DIM));
+                ui.horizontal(|ui| {
+                    for (code, label) in [
+                        ("vi", "Tiếng Việt"),
+                        ("en", "English"),
+                        ("auto", "Tự nhận"),
+                    ] {
+                        if ui
+                            .selectable_label(self.caption_lang == code, label)
+                            .clicked()
+                        {
+                            self.caption_lang = code.to_string();
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                let has_model = self.caption_model.is_some();
+                let busy = self.transcribe_job.is_some();
+                if ui
+                    .add_enabled(
+                        has_model && !busy,
+                        theme::accent_button("Bắt đầu nhận dạng"),
+                    )
+                    .clicked()
+                {
+                    if let Some(model) = self.caption_model.clone() {
+                        let project = self.project.clone();
+                        match media::start_transcribe(&project, &model, &self.caption_lang) {
+                            Ok(job) => {
+                                self.transcribe_job = Some(job);
+                                self.transcribe_status = tr.msg_transcribing.to_string();
+                            }
+                            Err(e) => {
+                                self.pending_toast = Some((e, false));
+                            }
+                        }
+                    }
+                }
+                if busy {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        ui.label(
+                            RichText::new(&self.transcribe_status)
+                                .size(10.0)
+                                .color(theme::DIM),
+                        );
+                    });
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Phụ đề được tạo trên làn Phụ đề; bấm vào từng câu để sửa nội dung.",
+                    )
+                    .size(9.5)
+                    .color(theme::FAINT),
+                );
+            });
+        if !open {
+            self.show_captions = false;
         }
     }
 
@@ -1593,7 +2186,11 @@ impl VieEdit {
                                 .strong()
                                 .color(theme::ACCENT),
                         );
-                        ui.label(RichText::new("v0.1.0").size(10.0).color(theme::FAINT));
+                        ui.label(
+                            RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                                .size(10.0)
+                                .color(theme::FAINT),
+                        );
                         ui.add_space(8.0);
                     });
                     ui.label(RichText::new(tr.about_body).size(11.5).color(theme::DIM));
@@ -1698,6 +2295,34 @@ impl VieEdit {
                 PickPurpose::ExportOutput => {
                     self.export_path = path.to_string_lossy().to_string();
                 }
+                PickPurpose::ImportSrt => match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let caps = media::parse_srt(&text);
+                        if caps.is_empty() {
+                            self.toast_now(ctx, "Không đọc được phụ đề trong tệp.", false);
+                        } else {
+                            let n = caps.len();
+                            self.add_captions(&caps);
+                            self.toast_now(ctx, format!("Đã nhập {} câu phụ đề.", n), true);
+                        }
+                    }
+                    Err(e) => {
+                        self.toast_now(ctx, format!("Không đọc được tệp: {}", e), false);
+                    }
+                },
+                PickPurpose::ExportSrt => {
+                    let p = if path.extension().is_none() {
+                        path.with_extension("srt")
+                    } else {
+                        path
+                    };
+                    let caps = media::captions_of(&self.project);
+                    if std::fs::write(&p, media::format_srt(&caps)).is_ok() {
+                        self.toast_now(ctx, format!("Đã lưu {} câu phụ đề.", caps.len()), true);
+                    } else {
+                        self.toast_now(ctx, "Không ghi được tệp phụ đề.", false);
+                    }
+                }
                 PickPurpose::LibraryFolder => {
                     self.library_root = path;
                     self.reload_library();
@@ -1758,6 +2383,7 @@ impl eframe::App for VieEdit {
         }
 
         self.poll_loader(ctx);
+        self.poll_transcribe(ctx);
         self.handle_keys(ctx);
 
         self.top_bar(ctx);
@@ -1767,6 +2393,7 @@ impl eframe::App for VieEdit {
         self.preview_panel(ctx);
 
         self.export_windows(ctx);
+        self.captions_window(ctx);
         self.about_windows(ctx);
         self.handle_picker(ctx);
 
@@ -1814,10 +2441,22 @@ impl eframe::App for VieEdit {
     }
 }
 
+fn effect_label(fx: &str, en: bool) -> String {
+    for (id, vi, en_name) in EFFECTS {
+        if *id == fx {
+            return if en {
+                (*en_name).to_string()
+            } else {
+                (*vi).to_string()
+            };
+        }
+    }
+    fx.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tiện ích ảnh
 // ---------------------------------------------------------------------------
-
 fn to_color_image(img: &image::DynamicImage) -> egui::ColorImage {
     let rgba = img.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
