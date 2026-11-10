@@ -1,0 +1,19 @@
+# Bỏ qua thư mục build
+/target
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Hệ điều hành
+.DS_Store
+Thumbs.db
+
+# Bản phát hành đóng gói
+/dist
+/package
+
+# Tệp dự án cá nhân
+*.vieedit
