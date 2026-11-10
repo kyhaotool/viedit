@@ -13,6 +13,7 @@ use crate::media::{self, ExportJob, ExportMsg, FrameLoader, FrameReq, Quality};
 use crate::model::{
     fmt_dur, fmt_time, Clip, Project, Source, SourceKind, TRACK_OVERLAY, TRACK_VIDEO,
 };
+use crate::settings;
 use crate::theme;
 use crate::timeline::{self, TimelineState};
 
@@ -96,7 +97,20 @@ impl VieEdit {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
 
-        let library_root = library::default_root();
+        let saved = settings::load();
+        let lang = match saved.lang.as_deref() {
+            Some("en") => Lang::En,
+            _ => Lang::Vi,
+        };
+
+        let mut library_root = library::default_root();
+        if let Some(root) = saved.library_root.as_deref() {
+            let p = PathBuf::from(root);
+            if p.is_dir() {
+                library_root = p;
+            }
+        }
+
         let assets = if library_root.is_dir() {
             library::scan(&library_root)
         } else {
@@ -106,7 +120,7 @@ impl VieEdit {
         Self {
             project: Project::default(),
             project_path: None,
-            lang: Lang::Vi,
+            lang,
             library_root,
             assets,
             tab: Tab::Titles,
@@ -147,6 +161,13 @@ impl VieEdit {
 
     fn t(&self) -> Tr {
         tr(self.lang)
+    }
+
+    fn persist_settings(&self) {
+        settings::save(&settings::Settings {
+            library_root: Some(self.library_root.to_string_lossy().to_string()),
+            lang: Some(self.lang.code().to_string()),
+        });
     }
 
     fn toast_now(&mut self, ctx: &egui::Context, text: impl Into<String>, ok: bool) {
@@ -410,10 +431,12 @@ impl VieEdit {
                             ui.label(RichText::new(tr.menu_language).small().color(theme::FAINT));
                             if ui.selectable_label(self.lang == Lang::Vi, "Tiếng Việt").clicked() {
                                 self.lang = Lang::Vi;
+                                self.persist_settings();
                                 ui.close_menu();
                             }
                             if ui.selectable_label(self.lang == Lang::En, "English").clicked() {
                                 self.lang = Lang::En;
+                                self.persist_settings();
                                 ui.close_menu();
                             }
                         });
@@ -1158,17 +1181,29 @@ impl VieEdit {
         let mut overlay = None;
         let mut text = None;
 
-        if !self.project.tracks[TRACK_VIDEO].hidden {
-            if let Some(clip) = self.project.clip_at(TRACK_VIDEO, self.playhead).cloned() {
-                let local = clip.in_pt + (self.playhead - clip.start);
-                base = self.texture_for_clip(ctx, &clip, local);
-                if !clip.text.trim().is_empty() {
-                    text = Some(clip.text.clone());
-                }
+        if !self
+            .project
+            .tracks
+            .get(TRACK_VIDEO)
+            .map(|t| !t.hidden)
+            .unwrap_or(true)
+        {
+            // track hình ảnh đang bị ẩn
+        } else if let Some(clip) = self.project.clip_at(TRACK_VIDEO, self.playhead).cloned() {
+            let local = clip.in_pt + (self.playhead - clip.start);
+            base = self.texture_for_clip(ctx, &clip, local);
+            if !clip.text.trim().is_empty() {
+                text = Some(clip.text.clone());
             }
         }
 
-        if !self.project.tracks[TRACK_OVERLAY].hidden {
+        if self
+            .project
+            .tracks
+            .get(TRACK_OVERLAY)
+            .map(|t| !t.hidden)
+            .unwrap_or(true)
+        {
             if let Some(clip) = self.project.clip_at(TRACK_OVERLAY, self.playhead).cloned() {
                 let local = clip.in_pt + (self.playhead - clip.start);
                 if let Some(t) = self.texture_for_clip(ctx, &clip, local) {
@@ -1666,7 +1701,11 @@ impl VieEdit {
                 PickPurpose::LibraryFolder => {
                     self.library_root = path;
                     self.reload_library();
-                    let msg = self.t().msg_loaded.to_string();
+                    self.persist_settings();
+                    let msg = format!(
+                        "Đã nạp {} tài nguyên từ thư mục mới.",
+                        self.assets.len()
+                    );
                     self.toast_now(ctx, msg, true);
                 }
             }

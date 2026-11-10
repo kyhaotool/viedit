@@ -48,6 +48,7 @@ Toàn bộ ứng dụng là một tệp thực thi Rust duy nhất, dùng [egui]
 - **Lưu / mở dự án**: định dạng `.vieedit` (JSON thuần, đọc được bằng tay).
 - **Hoàn tác / làm lại** 80 bước.
 - **Song ngữ**: Tiếng Việt ⇄ English ngay trong ứng dụng.
+- **Nhớ cấu hình**: thư mục thư viện và ngôn ngữ được lưu giữa các lần chạy.
 - **Không quảng cáo, không theo dõi, không cần mạng.**
 
 ---
